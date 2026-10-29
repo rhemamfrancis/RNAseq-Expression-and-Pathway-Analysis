@@ -1,0 +1,322 @@
+---
+author: "Rhema Francis"
+date: "2026-07-04"
+output: html_document
+---
+# Whole Genome Expression Analysis and Biomarker
+
+## Package Setup
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r install, eval=FALSE}
+install.packages("BiocManager")
+
+options(repos = BiocManager::repositories()
+        )
+BiocManager::install(c("DESeq2", "clusterProfiler", "org.Hs.eg.db", "enrichplot"), ask = FALSE, update = FALSE)
+install.packages(c("DESeq2", "clusterProfiler", "org.Hs.eg.db", "enrichplot", "ggplot2", "dplyr", "knitr"))
+```
+
+```{r library, message=FALSE, warning=FALSE}
+library(DESeq2)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(enrichplot)
+library(ggplot2)
+library(dplyr)
+library(knitr)
+```
+
+## Load Assignment 2 Outputs
+
+```{r}
+dds <- readRDS("dds_GSE184717.rds")
+results_deseq <- readRDS("results_deseq_GSE184717.rds")
+```
+
+## 1. Hierarchical Clustering
+
+### 1.1 Extract Normalized Counts 
+```{r}
+normalized_counts <- counts(dds, normalized = TRUE)
+
+dim(normalized_counts)
+```
+
+### 1.2 Log2 Normalization
+```{r}
+log_norm_counts <- log2(normalized_counts + 1)
+
+dim(log_norm_counts)
+```
+
+### 1.3 Filter to most variable genes
+```{r}
+gene_variance <- apply(log_norm_counts, 1, var)
+
+top_var_genes <- names(sort(gene_variance, decreasing = TRUE))[1:100]
+
+top_var_matrix <- log_norm_counts[top_var_genes, ]
+
+dim(top_var_matrix)
+```
+
+### 1.4 Hierarchical Clustering for Genes
+
+#### 1.4.1 Distance between genes
+```{r}
+gene_dist <- dist(top_var_matrix)
+```
+
+#### 1.4.2 Hierarchical Clustering
+```{r}
+gene_clusters <- hclust(gene_dist, method = "average")
+
+plot(gene_clusters, 
+     main = "Hierarchical Clustering for Genes", 
+     labels = FALSE,
+     xlab = "",
+     sub = ""
+)
+```
+
+Hierarchical clustering of the 100 most variable genes identified two major clusters, with one cluster (right) dividing into several smaller subclusters (around heights 20-30). The formation of distinct subclusters suggests that some genes have similar expression patterns across samples, which may indicate co-expression or shared involvement in the same biological pathways (Serin et al., 2016). The second major cluster (left) showed fewer distinct subclusters in comparison, indicating less variation in gene expression patterns (Tucker et al., 2020). To determine the biological significance of the genes driving these clusters, Gene Ontology and KEGG enrichment analyses are addressed in Section 3. 
+
+### 1.5 Hierarchical Clustering for Samples
+
+#### 1.5.1 Distance between samples
+```{r}
+# Transpose dataset
+sample_dist <- dist(t(top_var_matrix))
+```
+
+#### 1.5.2 Hierarchical Clustering
+```{r}
+sample_clusters <- hclust(sample_dist, method = "average")
+
+plot(sample_clusters,
+     main = "Hierarchical Clustering for Samples",
+     xlab = "",
+     sub = "",
+     cex = 0.7
+)
+```
+Hierarchical clustering of samples based on the 100 most variable genes showed a clear separation between tumor and normal samples, regardless of the organ they came from. Nearly all the tumor samples clustered together, while the adjacent/distant normal samples formed a separate branch. Overall, the samples grouped more by tumor status than the organ of origin, with only a few exceptions.
+
+## 2. Gene List Selection (Fold-Change and P-value Cutoff)
+### 2.1 Data Preparation 
+```{r}
+results_df <- as.data.frame(results_deseq)
+
+results_df$gene <- rownames(results_df)
+
+head(results_df)
+```
+### 2.2 P-value Cutoff
+```{r}
+adj_pval <- results_df[!is.na(results_df$padj) & results_df$padj < 0.05, ]
+
+dim(adj_pval)
+```
+
+### 2.3 Fold-change Filter
+```{r}
+fc_genes <- results_df[!is.na(results_df$log2FoldChange) & abs(results_df$log2FoldChange) >1, ]
+
+dim(fc_genes)
+head(fc_genes)
+```
+## 3. GO and KEGG Gene Annotations
+### 3.1 GO Enrichment
+#### 3.1.1 GO: Adjusted p-value list
+```{r}
+go_adj_pval <- enrichGO(gene = adj_pval$gene,
+                        OrgDb = org.Hs.eg.db,
+                        keyType = "SYMBOL",
+                        ont = "BP",
+                        pAdjustMethod = "BH",
+                        pvalueCutoff = 0.05)
+
+head(go_adj_pval)
+```
+#### 3.1.2 GO: Fold change list
+```{r}
+go_fc_genes <- enrichGO(gene = fc_genes$gene,
+                        OrgDb = org.Hs.eg.db,
+                        keyType = "SYMBOL",
+                        ont = "BP",
+                        pAdjustMethod = "BH",
+                        pvalueCutoff = 0.05)
+
+head(go_fc_genes)
+```
+GO enrichment analysis for both gene lists identified mostly olfactory receptor (OR) and sensory perception terms, likely due to large number of olfactory receptor genes in the human genome instead of biological processes associated with breast cancer (Yoshihito Niimura, 2012). Looking past the top results, the Fold-change GO enrichment identified terms related to keratinization, epidermis development, and neuropeptide signaling pathway. This likely reflects the variety of tissues sampled (including a skin sample), as opposed to tumor-specific expression patterns.  
+
+### 3.2 KEGG Enrichment
+#### 3.2.1 Convert gene symbols to Entrez IDS
+```{r}
+# Ajusted p-value gene list
+adj_pval_entrez <- bitr(adj_pval$gene,
+                        fromType = "SYMBOL",
+                        toType = "ENTREZID",
+                        OrgDb = org.Hs.eg.db)
+
+dim(adj_pval_entrez)
+
+# Fold-change gene list
+fc_genes_entrez <- bitr(fc_genes$gene,
+                        fromType = "SYMBOL",
+                        toType = "ENTREZID",
+                        OrgDb = org.Hs.eg.db)
+
+dim(fc_genes_entrez)
+```
+
+#### 3.2.2 KEGG: Adjusted p-value list
+```{r}
+kegg_adj_pval <- enrichKEGG(gene = adj_pval_entrez$ENTREZID,
+                            organism = "hsa",
+                            pAdjustMethod = "BH",
+                            pvalueCutoff = 0.05)
+
+head(kegg_adj_pval)
+```
+
+#### 3.2.3 KEGG: Fold-change list
+```{r}
+kegg_fc_genes <- enrichKEGG(gene = fc_genes_entrez$ENTREZID,
+                            organism = "hsa",
+                            pAdjustMethod = "BH",
+                            pvalueCutoff = 0.05)
+
+head(kegg_fc_genes)
+```
+KEGG enrichment showed a similar pattern to the GO analysis, mostly dominated by olfactory transduction and neuroactive ligand-receptor interaction as the top pathways in both gene lists. However, KEGG also identified pathways more relevant to cancer biology, including Cadherin Signaling (Yu et al., 2019) and Cytokine-Cytokine Receptor Interaction (Qu et al., 2024). 
+
+### 3.3 Which annotation is more reliable?
+The most significant GO and KEGG terms were related to olfactory receptor genes and neuroactive ligand-receptor interactions. As previously stated, these results are likely due to the large size of the OR gene family rather than actual breast cancer biology (Yoshihito Niimura, 2012). Furthermore, these results are likely amplified by the dataset's single-patient design and pseudoreplicates. 
+
+Outside of these top hits, both databases identified terms related to skin development and keratinization, most likely reflecting the tissue diversity of the biopsy sites. Unlike GO, KEGG additionally identified pathways with clearer links to cancer biology (e.g., cadherin signaling, cytokine-cytokine receptor interaction), suggesting that KEGG provided more biologically meaningful results for the dataset and is more reliable than GO enrichment in this case. 
+
+As discussed in the course lecture notes, an important limitation to consider is that KEGG enrichment analysis maps genes to predefined biological pathways, which may not reflect how those genes actually behave in this specific context. Therefore, these findings could be followed up with GSEA, which considers the full ranked gene list instead of only significant genes.   
+
+## 4. GSEA
+### 4.1 Build ranked gene list
+```{r}
+# remove genes with missing log2FoldChange
+gsea_input <-results_df[!is.na(results_df$log2FoldChange), ]
+
+# remove duplicate gene symbols
+gsea_input <- gsea_input[order(-abs(gsea_input$log2FoldChange)), ]
+gsea_input <- gsea_input[!duplicated(gsea_input$gene), ]
+
+# preserve gene ranking and sort in descending order 
+gene_list <- gsea_input$log2FoldChange
+names(gene_list) <- gsea_input$gene
+
+gene_list <- sort(gene_list, decreasing = TRUE)
+
+length(gene_list)
+head(gene_list)
+tail(gene_list)
+```
+### 4.2 Run GSEA with GO
+```{r}
+gsea_go <- gseGO(geneList = gene_list,
+                 OrgDb = org.Hs.eg.db,
+                 keyType = "SYMBOL",
+                 ont = "BP",
+                 pAdjustMethod = "BH",
+                 pvalueCutoff = 0.05)
+
+head(gsea_go)
+```
+### 4.3 Plot of Top GSEA-GO Result
+```{r}
+gseaplot2(gsea_go, geneSetID = "GO:0002478", title = " GO: 002478 Antigen Processing and Presentation (MHC Class II)")
+```
+
+Compared with the GO and KEGG enrichment analyses, GSEA revealed a directional pattern of genes involved in MHC class II antigen processing and presentation. These genes had a negative enrichment score (NES  = -3.63), indicating enrichment toward the normal tissue end of the gene list (Significance of Positive and Negative Correlation of Genes in GSEA Analysis, 2026). This suggests that genes involved in antigen presentation are downregulated in tumor samples. 
+
+This finding is consistent with a well-known immune evasion mechanism in cancer, where tumors reduce antigen presentation to avoid detection by the immune system (Dhatchinamoorthy et al., 2021).
+
+The GSEA plot for this result confirms the pattern that genes involved in the antigen presentation mechanism are shifted toward the normal tissue end of the ranked list. This is observed from the deep negative peak (-0.83) and recovery right afterwards. 
+### 4.4 Run GSEA with KEGG
+#### 4.4.1 Build a ranked list using entrez IDS
+```{r}
+# Change all genes to Entrez IDs
+gsea_entrez <- bitr(gsea_input$gene,
+                    fromType = "SYMBOL",
+                    toType = "ENTREZID",
+                    OrgDb = org.Hs.eg.db)
+
+# keep genes that successfully mapped
+gsea_mapped <-gsea_input[gsea_input$gene %in% gsea_entrez$SYMBOL, ]
+
+# attach entrez IDs to matching gene symbol
+gsea_mapped$ENTREZID <- gsea_entrez$ENTREZID[match(gsea_mapped$gene, gsea_entrez$SYMBOL)]
+
+# Remove duplicate Entrez IDs
+gsea_mapped <- gsea_mapped[order(-abs(gsea_mapped$log2FoldChange)), ]
+gsea_mapped <- gsea_mapped[!duplicated(gsea_mapped$ENTREZID), ]
+
+# preserve gene ranking and sort in descending order
+gene_list_entrez <- gsea_mapped$log2FoldChange
+names(gene_list_entrez) <- gsea_mapped$ENTREZID
+
+gene_list_entrez <- sort(gene_list_entrez, decreasing = TRUE)
+
+length(gene_list_entrez)
+head(gene_list_entrez)
+```
+
+### 4.4.2 GSEA with KEGG
+```{r}
+gsea_kegg <- gseKEGG(geneList = gene_list_entrez,
+                      organism = "hsa",
+                      pAdjustMethod = "BH",
+                      pvalueCutoff = 0.05)
+
+head(gsea_kegg)
+```
+
+### 4.4.3 Plot of Top GSEA-KEGG Result
+```{r}
+gseaplot2(gsea_kegg, geneSetID = "hsa05330", title = "hsa05330: Allograft Rejection (KEGG)")
+```
+
+Similar to the GSEA-GO results, GSEA using KEGG pathways supported the immune-related findings. The Allograft rejection (NES = -3.20) and Graft-versus-host disease (NES = -2.76) were significantly enriched in the normal tissue samples. 
+
+Since both of these pathways overlap with antigen presentation and immune recognition, the interpretation that tumor samples in this dataset reduce immune signaling is strengthened. Furthermore, olfactory and related sensory-perception continued to dominate the enrichment analyses, which supports the idea that these findings reflect a gene-family size artifact. 
+
+The plot also visually confirms this pattern. 
+
+## 5. Summary and Conclusions
+This analysis extended Assignment 2's differential expression results (GSE184717) through hierarchical clustering, functional annotation via GO and KEGG, and gene set enrichment analysis. 
+
+Hierarchical clustering of the 100 most variable genes separated the samples by tumor status instead of organ origin, indicating that this was the primary source of variation. Gene clustering identified two major clusters, with one containing several, smaller subclusters that may represent groups of co-expressed genes. 
+
+GO and KEGG annotation of two independently selected gene lists (p-value and fold-change cutoffs) consistently identified olfactory receptor and sensory perception terms as the most significant results. Skin- and keratin-related terms were also identified, highlighting the tissue diversity of the study design. KEGG's enrichment analysis was somewhat more interpretable than GO's, identifying potentially cancer-relevant pathways like cadherin signaling and cytokine-cytokine interactions. 
+
+GSEA provided the most biologically meaningful result. Both GSEA-GO and GSEA-KEGG identified reduced expression of MHC class II antigen presentation and related immune pathways in tumor samples. These findings are consistent with known mechanisms of immune evasion in cancer.
+
+Overall, the assignment highlights the strengths and limitations of enrichment analyses. Because the dataset only includes one patient, these results should be interpreted as patient-specific rather than generalizable breast cancer biomarkers. However, the repeated immune-evasion signal identified by different databases supports further investigation in larger cohorts. 
+
+## References:
+Dhatchinamoorthy, K., Colbert, J. D., & Rock, K. L. (2021). Cancer Immune Evasion Through Loss of MHC Class I Antigen Presentation. Frontiers in Immunology, 12. https://doi.org/10.3389/fimmu.2021.636568
+
+Huang, X., Qiao, Y., Brady, S. W., Factor, R. E., Downs-Kelly, E., Farrell, A., McQuerry, J. A., Shrestha, G., Jenkins, D., Johnson, W. E., Cohen, A. L., Bild, A. H., & Marth, G. T. (2021). Novel temporal and spatial patterns of metastatic colonization from breast cancer rapid-autopsy tumor biopsies. Genome Medicine, 13(1), 170. https://doi.org/10.1186/s13073-021-00989-6
+
+Qu, R., Zhao, Y., & Zhang, Y. (2024). The mechanism of cytokine regulation of cancer occurrence and development in the tumor microenvironment and its application in cancer treatment: a narrative review. Translational Cancer Research, 13(10), 5649–5663. https://doi.org/10.21037/tcr-24-679
+
+Tucker, N. R., Chaffin, M., Fleming, S. J., Hall, A. W., Parsons, V. A., Bedi, K. C., Akkad, A.-D., Herndon, C. N., Arduini, A., Papangeli, I., Roselli, C., Aguet, F., Choi, S. H., Ardlie, K. G., Babadi, M., Margulies, K. B., Stegmann, C. M., & Ellinor, P. T. (2020). Transcriptional and Cellular Diversity of the Human Heart. Circulation, 142(5), 466–482. https://doi.org/10.1161/circulationaha.119.045401
+
+Serin, E. A. R., Nijveen, H., Hilhorst, H. W. M., & Ligterink, W. (2016). Learning from Co-expression Networks: Possibilities and Challenges. Frontiers in Plant Science, 7. https://doi.org/10.3389/fpls.2016.00444
+
+Significance of Positive and Negative Correlation of Genes in GSEA Analysis. (2026). Cd-Genomics.com. https://bioinfo.cd-genomics.com/resource-positive-and-negative-correlation-of-genes-in-gsea-analysis.html
+
+Yoshihito Niimura. (2012). Olfactory Receptor Multigene Family in Vertebrates: From the Viewpoint of Evolutionary Genomics. Current Genomics, 13(2), 103–114. https://doi.org/10.2174/138920212799860706
+
+Yu, W., Yang, L., Li, T., & Zhang, Y. (2019). Cadherin Signaling in Cancer: Its Functions and Role as a Therapeutic Target. Frontiers in Oncology, 9. https://doi.org/10.3389/fonc.2019.00989
